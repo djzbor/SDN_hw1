@@ -97,7 +97,7 @@ public class Hw1Switch
     
     // more flow-mod defaults 
     protected static final short IDLE_TIMEOUT_DEFAULT = 10;
-    protected static final short HARD_TIMEOUT_DEFAULT = 0;
+    protected static final short HARD_TIMEOUT_DEFAULT = 3;
     protected static final short PRIORITY_DEFAULT = 100;
     
     // for managing our map sizes
