@@ -75,17 +75,13 @@ public class Hw1Switch
     // Module dependencies
     protected IFloodlightProviderService floodlightProvider;
     
-/* CS6998: data structures for the learning switch feature
     // Stores the learned state for each switch
     protected Map<IOFSwitch, Map<Long, Short>> macToSwitchPortMap;
-*/
 
-/* CS6998: data structures for the firewall feature
-    // Stores the accumulated packet length for each host node: <MACaddr, length>
-    protected Map<Long, Long> totalDataLengths;
-    // Stores the MAC address of hosts to block: <MACaddr, blockedTime>
+    // Stores the accumulated packet length for each host node
+    protected Map<Long, Map<IOFSwitch, Long>> totalDataLengths;
+    // Stores the MAC address of hosts to block: <Macaddr, blockedTime>
     protected Map<Long, Long> blacklist;
-*/
 
     // flow-mod - for use in the cookie
     public static final int HW1_SWITCH_APP_ID = 10;
@@ -97,7 +93,7 @@ public class Hw1Switch
     
     // more flow-mod defaults 
     protected static final short IDLE_TIMEOUT_DEFAULT = 10;
-    protected static final short HARD_TIMEOUT_DEFAULT = 0;
+    protected static final short HARD_TIMEOUT_DEFAULT = 3;
     protected static final short PRIORITY_DEFAULT = 100;
     
     // for managing our map sizes
@@ -105,6 +101,8 @@ public class Hw1Switch
 
     // maxinum allowed transmission size
     protected static final int FIREWALL_MAX_ALLOW_LENGTH = (15 * 1024 * 1024);
+    // time duration the firewall will block each node for
+    protected static final int FIREWALL_BLOCK_TIME_DUR = (10 * 1000);
     /**
      * @param floodlightProvider the floodlightProvider to set
      */
@@ -123,31 +121,27 @@ public class Hw1Switch
      * @param mac The MAC address of the host to add
      * @param portVal The switchport that the host is on
      */
-/* CS6998: fill out the following ????s
     protected void addToPortMap(IOFSwitch sw, long mac, short portVal) {
-        Map<Long, Short> swMap = ????;
+        Map<Long, Short> swMap = macToSwitchPortMap.get(sw);
         
         if (swMap == null) {
             // May be accessed by REST API so we need to make it thread safe
             swMap = Collections.synchronizedMap(new LRULinkedHashMap<Long, Short>(MAX_MACS_PER_SWITCH));
-            macToSwitchPortMap.put(????);
+            macToSwitchPortMap.put(sw, swMap);
         }
-        swMap.put(????);
+        swMap.put(mac, portVal);
     }
-*/
     
     /**
      * Removes a host from the MAC->SwitchPort mapping
      * @param sw The switch to remove the mapping from
      * @param mac The MAC address of the host to remove
      */
-/* CS6998: fill out the following ????s
     protected void removeFromPortMap(IOFSwitch sw, long mac) {
-        Map<Long, Short> swMap = macToSwitchPortMap.????
+        Map<Long, Short> swMap = macToSwitchPortMap.get(sw);
         if (swMap != null)
-            ????
+            swMap.remove(mac);
     }
-*/
 
     /**
      * Get the port that a MAC is associated with
@@ -155,12 +149,32 @@ public class Hw1Switch
      * @param mac The MAC address to get
      * @return The port the host is on
      */
-/* CS6998: fill out the following method
     public Short getFromPortMap(IOFSwitch sw, long mac) {
-        ....
+        Map<Long, Short> swMap = macToSwitchPortMap.get(sw);
+        if (swMap != null)
+            return swMap.get(mac);
+        
+        // if none found
+        return null;
     }
-*/
     
+    /**
+     * Clears the MAC -> SwitchPort map for all switches
+     */
+    public void clearLearnedTable() {
+        macToSwitchPortMap.clear();
+    }
+    
+    /**
+     * Clears the MAC -> SwitchPort map for a single switch
+     * @param sw The switch to clear the mapping for
+     */
+    public void clearLearnedTable(IOFSwitch sw) {
+        Map<Long, Short> swMap = macToSwitchPortMap.get(sw);
+        if (swMap != null)
+            swMap.clear();
+    }
+ 
     /**
      * Writes a OFFlowMod to a switch.
      * @param sw The switch tow rite the flowmod to.
@@ -295,51 +309,78 @@ public class Hw1Switch
         match.loadFromPacket(pi.getPacketData(), pi.getInPort());
         Long sourceMac = Ethernet.toLong(match.getDataLayerSource());
         Long destMac = Ethernet.toLong(match.getDataLayerDestination());
+        boolean blocked = false;
 
-/* CS6998: Do works here to maintain totalDataLengths & blacklist
- *         Use pi.getTotalLength() for totalDataLengths
-        ....
-*/
+        // learn the port for this MAC
+        this.addToPortMap(sw, sourceMac, pi.getInPort());
 
-/* CS6998: Filter-out hosts in blacklist
- *         Also, when the host is in blacklist check if the blockout time is
- *         expired and handle properly
-        if (....)
+        Map<IOFSwitch, Long> switchToLengthMap = totalDataLengths.get(sourceMac);
+        if (switchToLengthMap == null) {
+            switchToLengthMap = new HashMap<IOFSwitch, Long>();
+            totalDataLengths.put(sourceMac, switchToLengthMap);
+        }
+        Long currentLength = switchToLengthMap.get(sw);
+	Long blockedSince = blacklist.get(sourceMac);
+        if (currentLength == null)
+            currentLength = (long) 0;
+
+        if (blockedSince != null) {
+            if ((System.currentTimeMillis() - blockedSince) > FIREWALL_BLOCK_TIME_DUR) {
+                switchToLengthMap.clear();
+                blacklist.remove(sourceMac);
+                currentLength = (long) 0;
+                log.info("Unblocking [" + HexString.toHexString(sourceMac) + "] at " + System.currentTimeMillis());
+            }
+            else
+                blocked = true;
+	}
+
+        currentLength += pi.getTotalLength();
+        switchToLengthMap.put(sw, currentLength);
+
+        if (currentLength >= FIREWALL_MAX_ALLOW_LENGTH &&
+                blacklist.get(sourceMac) == null) {
+            log.info("Blocking   [" + HexString.toHexString(sourceMac) + "] at " + System.currentTimeMillis());
+            blacklist.put(sourceMac, System.currentTimeMillis());
+            blocked = true;
+        }
+
+        if (blocked)
             return Command.CONTINUE;
+
+        log.info("PacketIn at " + System.currentTimeMillis() + " match {} pi {} leng {} " , new Object[] { match, pi, pi.getTotalLength() });
+
+/*
+        // Only when it works as a hub
+        // Now the switch will flood the packet to all of its ports
+        this.writePacketOutForPacketIn(sw, pi, OFPort.OFPP_FLOOD.getValue());
 */
 
-/* CS6998: Ask the switch to flood the packet to all of its ports
- *         Thus, this module currently works as a dummy hub
- */
-        this.writePacketOutForPacketIn(sw, pi, OFPort.OFPP_FLOOD.getValue());
-
-/* CS6998: Ask the switch to flood the packet to all of its ports
+        // Learning Switch Implementation
         // Now output flow-mod and/or packet
-        // CS6998: Fill out the following ???? to obtain outPort
-        Short outPort = ....;
+        Short outPort = getFromPortMap(sw, destMac);
         if (outPort == null) {
             // If we haven't learned the port for the dest MAC, flood it
             // Don't flood broadcast packets if the broadcast is disabled.
             // XXX For Hw1Switch this doesn't do much. The sourceMac is removed
             //     from port map whenever a flow expires, so you would still see
             //     a lot of floods.
-            // CS6998: Fill out the following ????
-            this.writePacketOutForPacketIn(sw, pi, OFPort.OFPP_????.getValue());
+            this.writePacketOutForPacketIn(sw, pi, OFPort.OFPP_FLOOD.getValue());
         } else if (outPort == match.getInputPort()) {
-            log.trace("ignoring packet that arrived on same port as learned destination:"
+            log.info("ignoring packet that arrived on same port as learned destination:"
                     + " switch {} dest MAC {} port {}",
                     new Object[]{ sw, HexString.toHexString(destMac), outPort });
         } else {
             // Add flow table entry matching source MAC, dest MAC and input port
             // that sends to the port we previously learned for the dest MAC.
-            match.setWildcards(((Integer)sw.getAttribute(IOFSwitch.PROP_FASTWILDCARDS)).intValue()
+            match.setWildcards(((Integer) sw.getAttribute(IOFSwitch.PROP_FASTWILDCARDS)).intValue()
                     & ~OFMatch.OFPFW_IN_PORT
-                    & ~OFMatch.OFPFW_DL_SRC & ~OFMatch.OFPFW_DL_DST
+                    & ~OFMatch.OFPFW_DL_VLAN & ~OFMatch.OFPFW_DL_SRC & ~OFMatch.OFPFW_DL_DST
                     & ~OFMatch.OFPFW_NW_SRC_MASK & ~OFMatch.OFPFW_NW_DST_MASK);
-            // CS6998: Fill out the following ????
-            this.writeFlowMod(sw, OFFlowMod.OFPFC_ADD, pi.getBufferId(), match, ????);
+            this.writeFlowMod(sw, OFFlowMod.OFPFC_ADD, pi.getBufferId(), match, outPort);
+            log.info("{} flow entry installed {}", sw, match);
         }
-*/
+
         return Command.CONTINUE;
     }
 
@@ -350,13 +391,34 @@ public class Hw1Switch
      * @param flowRemovedMessage The flow removed message.
      * @return Whether to continue processing this message or stop.
      */
-/*    private Command processFlowRemovedMessage(IOFSwitch sw, OFFlowRemoved flowRemovedMessage) {
+    private Command processFlowRemovedMessage(IOFSwitch sw, OFFlowRemoved flowRemovedMessage) {
         if (flowRemovedMessage.getCookie() != Hw1Switch.HW1_SWITCH_COOKIE) {
             return Command.CONTINUE;
         }
+
+        Long sourceMac = Ethernet.toLong(flowRemovedMessage.getMatch().getDataLayerSource());
+        Long destMac = Ethernet.toLong(flowRemovedMessage.getMatch().getDataLayerDestination());
+
         if (log.isTraceEnabled()) {
-            log.trace("{} flow entry removed {}", sw, flowRemovedMessage);
+            log.trace("{} flow entry removed {}", sw, HexString.toHexString(sourceMac));
         }
+        Map<IOFSwitch, Long> switchToLengthMap = totalDataLengths.get(sourceMac);
+        if (switchToLengthMap == null) {
+            switchToLengthMap = new HashMap<IOFSwitch, Long>();
+            totalDataLengths.put(sourceMac, switchToLengthMap);
+        }
+        Long currentLength = switchToLengthMap.get(sw);
+        currentLength += flowRemovedMessage.getByteCount();
+        switchToLengthMap.put(sw, currentLength);
+
+        if (currentLength >= FIREWALL_MAX_ALLOW_LENGTH &&
+                blacklist.get(sourceMac) == null) {
+            log.info("Blocking   [" + HexString.toHexString(sourceMac) + "] at " + System.currentTimeMillis());
+            blacklist.put(sourceMac, System.currentTimeMillis());
+        }
+
+        log.info("{} flow entry removed {} used Bytes:" + flowRemovedMessage.getByteCount(), sw, HexString.toHexString(sourceMac));
+        log.info("{} flow entry removed {} used Bytes:" + flowRemovedMessage.getByteCount(), sw, HexString.toHexString(destMac));
         OFMatch match = flowRemovedMessage.getMatch();
         // When a flow entry expires, it means the device with the matching source
         // MAC address either stopped sending packets or moved to a different
@@ -365,24 +427,9 @@ public class Hw1Switch
         // it from the macToPortMap to revert to flooding packets to this device.
         this.removeFromPortMap(sw, Ethernet.toLong(match.getDataLayerSource()));
         
-        // Also, if packets keep coming from another device (e.g. from ping), the
-        // corresponding reverse flow entry will never expire on its own and will
-        // send the packets to the wrong port (the matching input port of the
-        // expired flow entry), so we must delete the reverse entry explicitly.
-        this.writeFlowMod(sw, OFFlowMod.OFPFC_DELETE, -1, match.clone()
-                .setWildcards(((Integer) sw.getAttribute(IOFSwitch.PROP_FASTWILDCARDS)).intValue()
-                        & ~OFMatch.OFPFW_DL_VLAN & ~OFMatch.OFPFW_DL_SRC & ~OFMatch.OFPFW_DL_DST
-                        & ~OFMatch.OFPFW_NW_SRC_MASK & ~OFMatch.OFPFW_NW_DST_MASK)
-                .setDataLayerSource(match.getDataLayerDestination())
-                .setDataLayerDestination(match.getDataLayerSource())
-                .setNetworkSource(match.getNetworkDestination())
-                .setNetworkDestination(match.getNetworkSource())
-                .setTransportSource(match.getTransportDestination())
-                .setTransportDestination(match.getTransportSource()),
-                match.getInputPort());
         return Command.CONTINUE;
     }
-*/
+
     // IOFMessageListener
     
     @Override
@@ -390,6 +437,10 @@ public class Hw1Switch
         switch (msg.getType()) {
             case PACKET_IN:
                 return this.processPacketInMessage(sw, (OFPacketIn) msg, cntx);
+
+            case FLOW_REMOVED:
+                return this.processFlowRemovedMessage(sw, (OFFlowRemoved) msg);
+
             case ERROR:
                 log.info("received an error {} from switch {}", (OFError) msg, sw);
                 return Command.CONTINUE;
@@ -441,21 +492,20 @@ public class Hw1Switch
     @Override
     public void init(FloodlightModuleContext context)
             throws FloodlightModuleException {
-        floodlightProvider =
-                context.getServiceImpl(IFloodlightProviderService.class);
-/* CS6998: Initialize data structures
         macToSwitchPortMap = 
                 new ConcurrentHashMap<IOFSwitch, Map<Long, Short>>();
+        floodlightProvider =
+                context.getServiceImpl(IFloodlightProviderService.class);
         totalDataLengths =
-                new ConcurrentHashMap<Long, Long>();
+                new ConcurrentHashMap<Long, Map<IOFSwitch, Long>>();
         blacklist =
                 new HashMap<Long, Long>();
-*/
     }
 
     @Override
     public void startUp(FloodlightModuleContext context) {
         floodlightProvider.addOFMessageListener(OFType.PACKET_IN, this);
+        floodlightProvider.addOFMessageListener(OFType.FLOW_REMOVED, this);
         floodlightProvider.addOFMessageListener(OFType.ERROR, this);
     }
 }
